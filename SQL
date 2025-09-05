@@ -1,0 +1,124 @@
+WITH database_statuscode AS (
+    SELECT 
+        Data,
+        concat(d.Hora, ':', d.Minuto) AS Hora_Minuto,
+        Api, 
+        Endpoint,
+        COUNT(IdentificarChamada) AS total_chamadas,
+        d.StatusCode, 
+        s.StatusXXX, 
+        s.TipoRequisicao, 
+        s.TipoRequisicao2
+    FROM database d
+    LEFT JOIN status_code s 
+        ON d.StatusCode = s.StatusCode
+    GROUP BY 1, 2, 3, 4, 6, 7, 8, 9
+),
+
+condicional_statuscode AS (
+    SELECT *,
+           CASE WHEN StatusCode = 200 THEN 1 ELSE NULL END AS Requisicao_2XX,
+           CASE WHEN StatusXXX IN ('2XX','5XX') THEN 1 ELSE NULL END AS Requisicao_Valida,
+           1 AS Requisicao_Invalida
+    FROM database_statuscode
+),
+
+data_agrupada AS (
+    SELECT 
+        Data, Api, Endpoint, Hora_Minuto,
+        SUM(Requisicao_2XX) AS Total_2XX,
+        SUM(Requisicao_Valida) AS Total_Valido,
+        SUM(total_chamadas) AS total_chamadas,
+        SUM(CASE WHEN StatusXXX IN ('4XX','5XX') THEN 1 ELSE 0 END) AS total_chamadas_erros,
+        SUM(CASE WHEN StatusCode IN (429,529) THEN 1 ELSE 0 END) AS total_chamadas_rejeitadas
+    FROM condicional_statuscode
+    GROUP BY Data, Api, Endpoint, Hora_Minuto
+),
+
+calculo_disponibilidade AS (
+    SELECT *,
+           CAST(Total_2XX AS DOUBLE) / NULLIF(Total_Valido, 0) AS Disponibilidade
+    FROM data_agrupada
+),
+
+disponibilidade_hora_minuto AS (
+    SELECT *,
+           CASE 
+               WHEN Disponibilidade < 0.95 THEN 'Indisponível'
+               WHEN Disponibilidade >= 0.95 THEN 'Disponível'
+               WHEN Total_2XX IS NULL THEN 'Indisponível'
+               ELSE 'Indefinido'
+           END AS Indicador
+    FROM calculo_disponibilidade
+),
+
+disponibilidade_diaria_status AS (
+    SELECT 
+        Data, 
+        Api, 
+        Endpoint,
+        SUM(CASE WHEN Indicador = 'Disponível' THEN 1 ELSE 0 END) AS disponivel,
+        SUM(CASE WHEN Indicador = 'Indisponível' THEN 1 ELSE 0 END) AS indisponivel,
+        SUM(total_chamadas) AS total_chamadas,
+        SUM(total_chamadas_erros) AS total_chamadas_erros,
+        SUM(total_chamadas_rejeitadas) AS total_chamadas_rejeitadas
+    FROM disponibilidade_hora_minuto
+    GROUP BY Data, Api, Endpoint
+),
+
+disponibilidade_diaria_agrupado AS (
+SELECT 
+    Data, 
+    Api, 
+    Endpoint,
+    CAST(disponivel AS DOUBLE) / NULLIF(disponivel + indisponivel, 0) AS disponibilidade_diaria,
+    total_chamadas,
+    total_chamadas_erros,
+    total_chamadas_rejeitadas
+FROM disponibilidade_diaria_status
+ORDER BY Data, Api, Endpoint
+),
+
+ordenacao AS (
+   SELECT 
+      Data,
+      Api,
+      Endpoint,
+      TempodeResposta,
+      ROW_NUMBER() OVER (PARTITION BY Data, Api, Endpoint ORDER BY TempodeResposta) AS rn,
+      COUNT(*) OVER (PARTITION BY Data, Api, Endpoint) AS total
+   FROM database
+   WHERE TempodeResposta IS NOT NULL
+),
+
+P95 AS (
+   SELECT 
+       Data,
+       Api,
+       Endpoint,
+       TempodeResposta AS tempo_P95,
+       total AS total_requisicoes
+   FROM ordenacao
+   WHERE rn = CEIL(0.95 * total)
+)
+
+SELECT 
+    ds.Data,
+    ds.Api,
+    ds.Endpoint,
+    ds.disponibilidade_diaria,
+    ds.total_chamadas,
+    ds.total_chamadas_erros,
+    ds.total_chamadas_rejeitadas,
+    p.tempo_P95,
+    p.total_requisicoes,
+    ROUND(CAST(p.total_requisicoes AS DOUBLE) / 86400.0, 4) AS chamadas_por_segundo,
+    CASE 
+        WHEN p.tempo_P95 <= 1500 THEN 'SLA OK (Alta)'
+        WHEN p.tempo_P95 <= 2000 THEN 'SLA OK (Média)'
+        WHEN p.tempo_P95 <= 4000 THEN 'SLA OK (Baixa)'
+        ELSE 'SLA NOK'
+    END AS Status_SLA
+FROM disponibilidade_diaria_agrupado ds
+LEFT JOIN P95 p ON ds.Data = p.Data AND ds.Api = p.Api AND ds.Endpoint = p.Endpoint
+ORDER BY ds.Data, ds.Api, ds.Endpoint;
