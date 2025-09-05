@@ -1,0 +1,9 @@
+﻿StatusCode,StatusXXX,Tipo_de_Requisicao,Tipo_de_Requisicao2
+200,2XX,Requisição válida,Requisição Válida com Sucesso
+403,4XX,Requisição não válida,
+401,4XX,Requisição não válida,
+404,4XX,Requisição não válida,
+422,4XX,Requisição não válida,
+400,4XX,Requisição não válida,
+504,5XX,Requisição válida,Requisição Válida com Erro
+500,5XX,Requisição válida,Requisição Válida com Erro
